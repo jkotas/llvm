@@ -99,6 +99,11 @@ public:
   void ChangeSection(MCSection *Section, const MCExpr *Subsection) override;
   void EmitInstruction(const MCInst &Inst, const MCSubtargetInfo& STI) override;
 
+  /// \brief EmitValueImpl with additional param, that allows to emit PCRelative
+  /// MCFixup.
+  void EmitValueImpl(const MCExpr *Value, unsigned Size,
+                     SMLoc Loc, bool isPCRelative);
+
   /// \brief Emit an instruction to a special fragment, because this instruction
   /// can change its size during relaxation.
   virtual void EmitInstToFragment(const MCInst &Inst, const MCSubtargetInfo &);
