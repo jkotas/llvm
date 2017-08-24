@@ -102,6 +102,9 @@ unsigned ARMELFObjectWriter::GetRelocTypeInner(const MCValue &Target,
         break;
       }
       break;
+    case FK_PCRel_4:
+      Type = ELF::R_ARM_REL32;
+      break;
     case ARM::fixup_arm_blx:
     case ARM::fixup_arm_uncondbl:
       switch (Modifier) {

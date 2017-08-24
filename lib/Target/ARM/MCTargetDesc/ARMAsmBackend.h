@@ -36,6 +36,7 @@ public:
 
   bool hasNOP() const { return STI->getFeatureBits()[ARM::HasV6T2Ops]; }
 
+  Optional<MCFixupKind> getFixupKind(StringRef Name) const override;
   const MCFixupKindInfo &getFixupKindInfo(MCFixupKind Kind) const override;
 
   /// processFixupValue - Target hook to process the literal value of a fixup

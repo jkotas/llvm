@@ -48,6 +48,14 @@ public:
 };
 } // end anonymous namespace
 
+Optional<MCFixupKind> ARMAsmBackend::getFixupKind(StringRef Name) const {
+  return StringSwitch<Optional<MCFixupKind>>(Name)
+      .Case("R_ARM_THM_MOVW_ABS_NC", (MCFixupKind)ARM::fixup_t2_movw_lo16)
+      .Case("R_ARM_THM_MOVT_ABS", (MCFixupKind)ARM::fixup_t2_movt_hi16)
+      .Case("R_ARM_THM_JUMP24", (MCFixupKind)ARM::fixup_arm_thumb_blx)
+      .Default(MCAsmBackend::getFixupKind(Name));
+}
+
 const MCFixupKindInfo &ARMAsmBackend::getFixupKindInfo(MCFixupKind Kind) const {
   const static MCFixupKindInfo InfosLE[ARM::NumTargetFixupKinds] = {
       // This table *must* be in the order that the fixup_* kinds are defined in
@@ -368,6 +376,8 @@ unsigned ARMAsmBackend::adjustFixupValue(const MCFixup &Fixup, uint64_t Value,
   case FK_Data_1:
   case FK_Data_2:
   case FK_Data_4:
+    return Value;
+  case FK_PCRel_4:
     return Value;
   case FK_SecRel_2:
     return Value;
@@ -789,6 +799,9 @@ static unsigned getFixupKindNumBytes(unsigned Kind) {
   case ARM::fixup_arm_movw_lo16:
   case ARM::fixup_t2_movt_hi16:
   case ARM::fixup_t2_movw_lo16:
+    return 4;
+
+  case FK_PCRel_4:
     return 4;
 
   case FK_SecRel_2:
