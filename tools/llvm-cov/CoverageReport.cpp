@@ -132,13 +132,13 @@ unsigned getNumRedundantPathComponents(ArrayRef<std::string> Paths) {
          enumerate(make_range(sys::path::begin(Path), sys::path::end(Path)))) {
       // Do not increase the number of redundant components: that would remove
       // useful parts of already-visited paths.
-      if (Component.Index >= NumRedundant)
+      if (Component.index() >= NumRedundant)
         break;
 
       // Lower the number of redundant components when there's a mismatch
       // between the first path, and the path under consideration.
-      if (FirstPathComponents[Component.Index] != Component.Value) {
-        NumRedundant = Component.Index;
+      if (FirstPathComponents[Component.index()] != Component.value()) {
+        NumRedundant = Component.index();
         break;
       }
     }
@@ -317,25 +317,19 @@ CoverageReport::prepareFileReports(const coverage::CoverageMapping &Coverage,
   for (StringRef Filename : Files) {
     FileCoverageSummary Summary(Filename.drop_front(LCP));
 
-    // Map source locations to aggregate function coverage summaries.
-    DenseMap<std::pair<unsigned, unsigned>, FunctionCoverageSummary> Summaries;
+    for (const auto &Group : Coverage.getInstantiationGroups(Filename)) {
+      std::vector<FunctionCoverageSummary> InstantiationSummaries;
+      for (const coverage::FunctionRecord *F : Group.getInstantiations()) {
+        auto InstantiationSummary = FunctionCoverageSummary::get(*F);
+        Summary.addInstantiation(InstantiationSummary);
+        Totals.addInstantiation(InstantiationSummary);
+        InstantiationSummaries.push_back(InstantiationSummary);
+      }
 
-    for (const auto &F : Coverage.getCoveredFunctions(Filename)) {
-      FunctionCoverageSummary Function = FunctionCoverageSummary::get(F);
-      auto StartLoc = F.CountedRegions[0].startLoc();
-
-      auto UniquedSummary = Summaries.insert({StartLoc, Function});
-      if (!UniquedSummary.second)
-        UniquedSummary.first->second.update(Function);
-
-      Summary.addInstantiation(Function);
-      Totals.addInstantiation(Function);
-    }
-
-    for (const auto &UniquedSummary : Summaries) {
-      const FunctionCoverageSummary &FCS = UniquedSummary.second;
-      Summary.addFunction(FCS);
-      Totals.addFunction(FCS);
+      auto GroupSummary =
+          FunctionCoverageSummary::get(Group, InstantiationSummaries);
+      Summary.addFunction(GroupSummary);
+      Totals.addFunction(GroupSummary);
     }
 
     FileReports.push_back(Summary);
@@ -377,8 +371,22 @@ void CoverageReport::renderFileReports(raw_ostream &OS,
   renderDivider(FileReportColumns, OS);
   OS << "\n";
 
-  for (const FileCoverageSummary &FCS : FileReports)
-    render(FCS, OS);
+  bool EmptyFiles = false;
+  for (const FileCoverageSummary &FCS : FileReports) {
+    if (FCS.FunctionCoverage.NumFunctions)
+      render(FCS, OS);
+    else
+      EmptyFiles = true;
+  }
+
+  if (EmptyFiles) {
+    OS << "\n"
+       << "Files which contain no functions:\n";
+
+    for (const FileCoverageSummary &FCS : FileReports)
+      if (!FCS.FunctionCoverage.NumFunctions)
+        render(FCS, OS);
+  }
 
   renderDivider(FileReportColumns, OS);
   OS << "\n";

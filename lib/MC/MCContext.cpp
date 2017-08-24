@@ -7,14 +7,16 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "llvm/MC/MCContext.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
+#include "llvm/BinaryFormat/COFF.h"
+#include "llvm/BinaryFormat/ELF.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCCodeView.h"
-#include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCDwarf.h"
 #include "llvm/MC/MCExpr.h"
 #include "llvm/MC/MCFragment.h"
@@ -32,14 +34,12 @@
 #include "llvm/MC/MCSymbolWasm.h"
 #include "llvm/MC/SectionKind.h"
 #include "llvm/Support/Casting.h"
-#include "llvm/Support/COFF.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/Support/ELF.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/raw_ostream.h"
 #include <cassert>
 #include <cstdlib>
 #include <tuple>
@@ -317,7 +317,7 @@ MCSectionELF *MCContext::createELFSectionImpl(StringRef Section, unsigned Type,
                                               unsigned EntrySize,
                                               const MCSymbolELF *Group,
                                               unsigned UniqueID,
-                                              const MCSectionELF *Associated) {
+                                              const MCSymbolELF *Associated) {
   MCSymbolELF *R;
   MCSymbol *&Sym = Symbols[Section];
   // A section symbol can not redefine regular symbols. There may be multiple
@@ -350,15 +350,15 @@ MCSectionELF *MCContext::createELFSectionImpl(StringRef Section, unsigned Type,
 MCSectionELF *MCContext::createELFRelSection(const Twine &Name, unsigned Type,
                                              unsigned Flags, unsigned EntrySize,
                                              const MCSymbolELF *Group,
-                                             const MCSectionELF *Associated) {
+                                             const MCSectionELF *RelInfoSection) {
   StringMap<bool>::iterator I;
   bool Inserted;
   std::tie(I, Inserted) =
       RelSecNames.insert(std::make_pair(Name.str(), true));
 
-  return createELFSectionImpl(I->getKey(), Type, Flags,
-                              SectionKind::getReadOnly(), EntrySize, Group,
-                              true, Associated);
+  return createELFSectionImpl(
+      I->getKey(), Type, Flags, SectionKind::getReadOnly(), EntrySize, Group,
+      true, cast<MCSymbolELF>(RelInfoSection->getBeginSymbol()));
 }
 
 MCSectionELF *MCContext::getELFNamedSection(const Twine &Prefix,
@@ -371,7 +371,7 @@ MCSectionELF *MCContext::getELFNamedSection(const Twine &Prefix,
 MCSectionELF *MCContext::getELFSection(const Twine &Section, unsigned Type,
                                        unsigned Flags, unsigned EntrySize,
                                        const Twine &Group, unsigned UniqueID,
-                                       const MCSectionELF *Associated) {
+                                       const MCSymbolELF *Associated) {
   MCSymbolELF *GroupSym = nullptr;
   if (!Group.isTriviallyEmpty() && !Group.str().empty())
     GroupSym = cast<MCSymbolELF>(getOrCreateSymbol(Group));
@@ -384,7 +384,7 @@ MCSectionELF *MCContext::getELFSection(const Twine &Section, unsigned Type,
                                        unsigned Flags, unsigned EntrySize,
                                        const MCSymbolELF *GroupSym,
                                        unsigned UniqueID,
-                                       const MCSectionELF *Associated) {
+                                       const MCSymbolELF *Associated) {
   StringRef Group = "";
   if (GroupSym)
     Group = GroupSym->getName();

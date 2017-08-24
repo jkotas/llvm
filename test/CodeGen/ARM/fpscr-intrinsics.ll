@@ -1,5 +1,23 @@
-; RUN: llc < %s -O0 -mtriple=armv7-eabi -mcpu=cortex-a8 | FileCheck %s
-; RUN: llc < %s -O3 -mtriple=armv7-eabi -mcpu=cortex-a8 | FileCheck %s
+; RUN: llc < %s -O0 -mtriple=armv7-eabi -mcpu=cortex-a8 -mattr=+neon,+fp-armv8 | FileCheck %s
+; RUN: llc < %s -O3 -mtriple=armv7-eabi -mcpu=cortex-a8 -mattr=+neon,+fp-armv8 | FileCheck %s
+
+@a = common global double 0.000000e+00, align 8
+
+; Function Attrs: noinline nounwind uwtable
+define void @strtod() {
+entry:
+  ; CHECK: vmrs r{{[0-9]+}}, fpscr
+  %0 = call i32 @llvm.flt.rounds()
+  %tobool = icmp ne i32 %0, 0
+  br i1 %tobool, label %if.then, label %if.end
+
+if.then:                                          ; preds = %entry
+  store double 5.000000e-01, double* @a, align 8
+  br label %if.end
+
+if.end:                                           ; preds = %if.then, %entry
+  ret void
+}
 
 ; Function Attrs: nounwind
 define void @fn1(i32* nocapture %p) local_unnamed_addr {
@@ -21,3 +39,6 @@ declare i32 @llvm.arm.get.fpscr()
 
 ; Function Attrs: nounwind writeonly
 declare void @llvm.arm.set.fpscr(i32)
+
+; Function Attrs: nounwind
+declare i32 @llvm.flt.rounds()

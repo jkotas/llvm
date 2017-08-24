@@ -15,8 +15,8 @@
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
@@ -86,7 +86,7 @@ private:
   bool parseOperand(OperandVector &Operands, bool isCondCode,
                     bool invertCondCode);
 
-  bool showMatchError(SMLoc Loc, unsigned ErrCode);
+  bool showMatchError(SMLoc Loc, unsigned ErrCode, OperandVector &Operands);
 
   bool parseDirectiveArch(SMLoc L);
   bool parseDirectiveCPU(SMLoc L);
@@ -464,6 +464,15 @@ public:
       return false;
     int64_t Val = MCE->getValue();
     return (Val >= -256 && Val < 256);
+  }
+  bool isSImm10s8() const {
+    if (!isImm())
+      return false;
+    const MCConstantExpr *MCE = dyn_cast<MCConstantExpr>(getImm());
+    if (!MCE)
+      return false;
+    int64_t Val = MCE->getValue();
+    return (Val >= -4096 && Val < 4089 && (Val & 7) == 0);
   }
   bool isSImm7s4() const {
     if (!isImm())
@@ -1213,6 +1222,12 @@ public:
     Inst.addOperand(MCOperand::createImm(MCE->getValue()));
   }
 
+  void addSImm10s8Operands(MCInst &Inst, unsigned N) const {
+    assert(N == 1 && "Invalid number of operands!");
+    const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
+    Inst.addOperand(MCOperand::createImm(MCE->getValue() / 8));
+  }
+
   void addSImm7s4Operands(MCInst &Inst, unsigned N) const {
     assert(N == 1 && "Invalid number of operands!");
     const MCConstantExpr *MCE = cast<MCConstantExpr>(getImm());
@@ -1810,6 +1825,8 @@ static bool isValidVectorKind(StringRef Name) {
       .Case(".d", true)
       // Needed for fp16 scalar pairwise reductions
       .Case(".2h", true)
+      // another special case for the ARMv8.2a dot product operand
+      .Case(".4b", true)
       .Default(false);
 }
 
@@ -2100,27 +2117,9 @@ AArch64AsmParser::tryParseFPImm(OperandVector &Operands) {
   bool isNegative = parseOptionalToken(AsmToken::Minus);
 
   const AsmToken &Tok = Parser.getTok();
-  if (Tok.is(AsmToken::Real)) {
-    APFloat RealVal(APFloat::IEEEdouble(), Tok.getString());
-    if (isNegative)
-      RealVal.changeSign();
-
-    uint64_t IntVal = RealVal.bitcastToAPInt().getZExtValue();
-    int Val = AArch64_AM::getFP64Imm(APInt(64, IntVal));
-    Parser.Lex(); // Eat the token.
-    // Check for out of range values. As an exception, we let Zero through,
-    // as we handle that special case in post-processing before matching in
-    // order to use the zero register for it.
-    if (Val == -1 && !RealVal.isPosZero()) {
-      TokError("expected compatible register or floating-point constant");
-      return MatchOperand_ParseFail;
-    }
-    Operands.push_back(AArch64Operand::CreateFPImm(Val, S, getContext()));
-    return MatchOperand_Success;
-  }
-  if (Tok.is(AsmToken::Integer)) {
+  if (Tok.is(AsmToken::Real) || Tok.is(AsmToken::Integer)) {
     int64_t Val;
-    if (!isNegative && Tok.getString().startswith("0x")) {
+    if (Tok.is(AsmToken::Integer) && !isNegative && Tok.getString().startswith("0x")) {
       Val = Tok.getIntVal();
       if (Val > 255 || Val < 0) {
         TokError("encoded floating point value out of range");
@@ -2128,10 +2127,24 @@ AArch64AsmParser::tryParseFPImm(OperandVector &Operands) {
       }
     } else {
       APFloat RealVal(APFloat::IEEEdouble(), Tok.getString());
+      if (isNegative)
+        RealVal.changeSign();
+
       uint64_t IntVal = RealVal.bitcastToAPInt().getZExtValue();
-      // If we had a '-' in front, toggle the sign bit.
-      IntVal ^= (uint64_t)isNegative << 63;
       Val = AArch64_AM::getFP64Imm(APInt(64, IntVal));
+
+      // Check for out of range values. As an exception we let Zero through,
+      // but as tokens instead of an FPImm so that it can be matched by the
+      // appropriate alias if one exists.
+      if (RealVal.isPosZero()) {
+        Parser.Lex(); // Eat the token.
+        Operands.push_back(AArch64Operand::CreateToken("#0", false, S, getContext()));
+        Operands.push_back(AArch64Operand::CreateToken(".0", false, S, getContext()));
+        return MatchOperand_Success;
+      } else if (Val == -1) {
+        TokError("expected compatible register or floating-point constant");
+        return MatchOperand_ParseFail;
+      }
     }
     Parser.Lex(); // Eat the token.
     Operands.push_back(AArch64Operand::CreateFPImm(Val, S, getContext()));
@@ -2477,15 +2490,13 @@ AArch64AsmParser::tryParseBarrierOperand(OperandVector &Operands) {
     return MatchOperand_ParseFail;
   }
 
-  auto DB = AArch64DB::lookupDBByName(Tok.getString());
-  if (!DB) {
-    TokError("invalid barrier option name");
-    return MatchOperand_ParseFail;
-  }
-
   // The only valid named option for ISB is 'sy'
-  if (Mnemonic == "isb" && DB->Encoding != AArch64DB::sy) {
+  auto DB = AArch64DB::lookupDBByName(Tok.getString());
+  if (Mnemonic == "isb" && (!DB || DB->Encoding != AArch64DB::sy)) {
     TokError("'sy' or #imm operand expected");
+    return MatchOperand_ParseFail;
+  } else if (!DB) {
+    TokError("invalid barrier option name");
     return MatchOperand_ParseFail;
   }
 
@@ -3263,7 +3274,10 @@ bool AArch64AsmParser::validateInstruction(MCInst &Inst,
   }
 }
 
-bool AArch64AsmParser::showMatchError(SMLoc Loc, unsigned ErrCode) {
+std::string AArch64MnemonicSpellCheck(StringRef S, uint64_t FBS);
+
+bool AArch64AsmParser::showMatchError(SMLoc Loc, unsigned ErrCode,
+                                      OperandVector &Operands) {
   switch (ErrCode) {
   case Match_MissingFeature:
     return Error(Loc,
@@ -3300,6 +3314,8 @@ bool AArch64AsmParser::showMatchError(SMLoc Loc, unsigned ErrCode) {
                  "expected compatible register or floating-point constant");
   case Match_InvalidMemoryIndexedSImm9:
     return Error(Loc, "index must be an integer in range [-256, 255].");
+  case Match_InvalidMemoryIndexedSImm10:
+    return Error(Loc, "index must be a multiple of 8 in range [-4096, 4088].");
   case Match_InvalidMemoryIndexed4SImm7:
     return Error(Loc, "index must be a multiple of 4 in range [-256, 252].");
   case Match_InvalidMemoryIndexed8SImm7:
@@ -3386,8 +3402,12 @@ bool AArch64AsmParser::showMatchError(SMLoc Loc, unsigned ErrCode) {
     return Error(Loc, "expected readable system register");
   case Match_MSR:
     return Error(Loc, "expected writable system register or pstate");
-  case Match_MnemonicFail:
-    return Error(Loc, "unrecognized instruction mnemonic");
+  case Match_MnemonicFail: {
+    std::string Suggestion = AArch64MnemonicSpellCheck(
+        ((AArch64Operand &)*Operands[0]).getToken(),
+        ComputeAvailableFeatures(STI->getFeatureBits()));
+    return Error(Loc, "unrecognized instruction mnemonic" + Suggestion);
+  }
   default:
     llvm_unreachable("unexpected error code!");
   }
@@ -3655,21 +3675,6 @@ bool AArch64AsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
     }
   }
 
-  // Yet another horrible hack to handle FMOV Rd, #0.0 using [WX]ZR.
-  if (NumOperands == 3 && Tok == "fmov") {
-    AArch64Operand &RegOp = static_cast<AArch64Operand &>(*Operands[1]);
-    AArch64Operand &ImmOp = static_cast<AArch64Operand &>(*Operands[2]);
-    if (RegOp.isReg() && ImmOp.isFPImm() && ImmOp.getFPImm() == (unsigned)-1) {
-      unsigned zreg =
-          !AArch64MCRegisterClasses[AArch64::FPR64RegClassID].contains(
-              RegOp.getReg())
-              ? AArch64::WZR
-              : AArch64::XZR;
-      Operands[2] = AArch64Operand::CreateReg(zreg, false, Op.getStartLoc(),
-                                              Op.getEndLoc(), getContext());
-    }
-  }
-
   MCInst Inst;
   // First try to match against the secondary set of tables containing the
   // short-form NEON instructions (e.g. "fadd.2s v0, v1, v2").
@@ -3728,7 +3733,7 @@ bool AArch64AsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
     return Error(IDLoc, Msg);
   }
   case Match_MnemonicFail:
-    return showMatchError(IDLoc, MatchResult);
+    return showMatchError(IDLoc, MatchResult, Operands);
   case Match_InvalidOperand: {
     SMLoc ErrorLoc = IDLoc;
 
@@ -3747,7 +3752,7 @@ bool AArch64AsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
         ((AArch64Operand &)*Operands[ErrorInfo]).isTokenSuffix())
       MatchResult = Match_InvalidSuffix;
 
-    return showMatchError(ErrorLoc, MatchResult);
+    return showMatchError(ErrorLoc, MatchResult, Operands);
   }
   case Match_InvalidMemoryIndexed1:
   case Match_InvalidMemoryIndexed2:
@@ -3778,6 +3783,7 @@ bool AArch64AsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
   case Match_InvalidMemoryIndexed8SImm7:
   case Match_InvalidMemoryIndexed16SImm7:
   case Match_InvalidMemoryIndexedSImm9:
+  case Match_InvalidMemoryIndexedSImm10:
   case Match_InvalidImm0_1:
   case Match_InvalidImm0_7:
   case Match_InvalidImm0_15:
@@ -3805,7 +3811,7 @@ bool AArch64AsmParser::MatchAndEmitInstruction(SMLoc IDLoc, unsigned &Opcode,
     SMLoc ErrorLoc = ((AArch64Operand &)*Operands[ErrorInfo]).getStartLoc();
     if (ErrorLoc == SMLoc())
       ErrorLoc = IDLoc;
-    return showMatchError(ErrorLoc, MatchResult);
+    return showMatchError(ErrorLoc, MatchResult, Operands);
   }
   }
 
@@ -3876,8 +3882,8 @@ bool AArch64AsmParser::parseDirectiveArch(SMLoc L) {
   std::tie(Arch, ExtensionString) =
       getParser().parseStringToEndOfStatement().trim().split('+');
 
-  unsigned ID = AArch64::parseArch(Arch);
-  if (ID == static_cast<unsigned>(AArch64::ArchKind::AK_INVALID))
+  AArch64::ArchKind ID = AArch64::parseArch(Arch);
+  if (ID == AArch64::ArchKind::INVALID)
     return Error(ArchLoc, "unknown arch name");
 
   if (parseToken(AsmToken::EndOfStatement))
@@ -3925,10 +3931,14 @@ bool AArch64AsmParser::parseDirectiveArch(SMLoc L) {
   return false;
 }
 
+static SMLoc incrementLoc(SMLoc L, int Offset) {
+  return SMLoc::getFromPointer(L.getPointer() + Offset);
+}
+
 /// parseDirectiveCPU
 ///   ::= .cpu id
 bool AArch64AsmParser::parseDirectiveCPU(SMLoc L) {
-  SMLoc CPULoc = getLoc();
+  SMLoc CurLoc = getLoc();
 
   StringRef CPU, ExtensionString;
   std::tie(CPU, ExtensionString) =
@@ -3944,15 +3954,19 @@ bool AArch64AsmParser::parseDirectiveCPU(SMLoc L) {
   // FIXME This is using tablegen data, but should be moved to ARMTargetParser
   // once that is tablegen'ed
   if (!getSTI().isCPUStringValid(CPU)) {
-    Error(CPULoc, "unknown CPU name");
+    Error(CurLoc, "unknown CPU name");
     return false;
   }
 
   MCSubtargetInfo &STI = copySTI();
   STI.setDefaultFeatures(CPU, "");
+  CurLoc = incrementLoc(CurLoc, CPU.size());
 
   FeatureBitset Features = STI.getFeatureBits();
   for (auto Name : RequestedExtensions) {
+    // Advance source location past '+'.
+    CurLoc = incrementLoc(CurLoc, 1);
+
     bool EnableFeature = true;
 
     if (Name.startswith_lower("no")) {
@@ -3960,6 +3974,7 @@ bool AArch64AsmParser::parseDirectiveCPU(SMLoc L) {
       Name = Name.substr(2);
     }
 
+    bool FoundExtension = false;
     for (const auto &Extension : ExtensionMap) {
       if (Extension.Name != Name)
         continue;
@@ -3973,9 +3988,15 @@ bool AArch64AsmParser::parseDirectiveCPU(SMLoc L) {
       uint64_t Features =
           ComputeAvailableFeatures(STI.ToggleFeature(ToggleFeatures));
       setAvailableFeatures(Features);
+      FoundExtension = true;
 
       break;
     }
+
+    if (!FoundExtension)
+      Error(CurLoc, "unsupported architectural extension");
+
+    CurLoc = incrementLoc(CurLoc, Name.size());
   }
   return false;
 }

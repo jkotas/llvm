@@ -24,7 +24,7 @@ define i64 @test2(i64 %a) {
 ; CHECK-LABEL: @test2(
 ; CHECK-NEXT:    [[B:%.*]] = trunc i64 %a to i32
 ; CHECK-NEXT:    [[D1:%.*]] = shl i64 %a, 36
-; CHECK-NEXT:    [[D:%.*]] = ashr exact i64 [[D:%.*]]1, 36
+; CHECK-NEXT:    [[D:%.*]] = ashr exact i64 [[D1]], 36
 ; CHECK-NEXT:    call void @use(i32 [[B]])
 ; CHECK-NEXT:    ret i64 [[D]]
 ;
@@ -89,11 +89,52 @@ define i32 @test6(i64 %A) {
   ret i32 %D
 }
 
+define i16 @ashr_mul(i8 %X, i8 %Y) {
+; CHECK-LABEL: @ashr_mul(
+; CHECK-NEXT:    [[A:%.*]] = sext i8 %X to i16
+; CHECK-NEXT:    [[B:%.*]] = sext i8 %Y to i16
+; CHECK-NEXT:    [[C:%.*]] = mul nsw i16 [[A]], [[B]]
+; CHECK-NEXT:    [[D:%.*]] = ashr i16 [[C]], 8
+; CHECK-NEXT:    ret i16 [[D]]
+  %A = sext i8 %X to i20
+  %B = sext i8 %Y to i20
+  %C = mul i20 %A, %B
+  %D = ashr i20 %C, 8
+  %E = trunc i20 %D to i16
+  ret i16 %E
+}
+
+define i32 @trunc_ashr(i32 %X) {
+; CHECK-LABEL: @trunc_ashr(
+; CHECK-NEXT:    [[B:%.*]] = or i32 [[X:%.*]], -2147483648
+; CHECK-NEXT:    [[C:%.*]] = ashr i32 [[B]], 8
+; CHECK-NEXT:    ret i32 [[C]]
+;
+  %A = zext i32 %X to i36
+  %B = or i36 %A, -2147483648 ; 0xF80000000
+  %C = ashr i36 %B, 8
+  %T = trunc i36 %C to i32
+  ret i32  %T
+}
+
+define <2 x i32> @trunc_ashr_vec(<2 x i32> %X) {
+; CHECK-LABEL: @trunc_ashr_vec(
+; CHECK-NEXT:    [[B:%.*]] = or <2 x i32> [[X:%.*]], <i32 -2147483648, i32 -2147483648>
+; CHECK-NEXT:    [[C:%.*]] = ashr <2 x i32> [[B]], <i32 8, i32 8>
+; CHECK-NEXT:    ret <2 x i32> [[C]]
+;
+  %A = zext <2 x i32> %X to <2 x i36>
+  %B = or <2 x i36> %A, <i36 -2147483648, i36 -2147483648> ; 0xF80000000
+  %C = ashr <2 x i36> %B, <i36 8, i36 8>
+  %T = trunc <2 x i36> %C to <2 x i32>
+  ret <2 x i32>  %T
+}
+
 define i92 @test7(i64 %A) {
 ; CHECK-LABEL: @test7(
-; CHECK-NEXT:    [[B:%.*]] = zext i64 %A to i92
-; CHECK-NEXT:    [[C:%.*]] = lshr i92 [[B]], 32
-; CHECK-NEXT:    ret i92 [[C]]
+; CHECK-NEXT:    [[TMP1:%.*]] = lshr i64 %A, 32
+; CHECK-NEXT:    [[D:%.*]] = zext i64 [[TMP1]] to i92
+; CHECK-NEXT:    ret i92 [[D]]
 ;
   %B = zext i64 %A to i128
   %C = lshr i128 %B, 32
@@ -478,13 +519,12 @@ define <4 x i8> @wide_shuf(<4 x i32> %x) {
   ret <4 x i8> %trunc
 }
 
-; FIXME:
 ; trunc (shuffle X, undef, SplatMask) --> shuffle (trunc X), undef, SplatMask
 
 define <4 x i8> @wide_splat1(<4 x i32> %x) {
 ; CHECK-LABEL: @wide_splat1(
-; CHECK-NEXT:    [[SHUF:%.*]] = shufflevector <4 x i32> %x, <4 x i32> undef, <4 x i32> <i32 2, i32 2, i32 2, i32 2>
-; CHECK-NEXT:    [[TRUNC:%.*]] = trunc <4 x i32> [[SHUF]] to <4 x i8>
+; CHECK-NEXT:    [[TMP1:%.*]] = trunc <4 x i32> %x to <4 x i8>
+; CHECK-NEXT:    [[TRUNC:%.*]] = shufflevector <4 x i8> [[TMP1]], <4 x i8> undef, <4 x i32> <i32 2, i32 2, i32 2, i32 2>
 ; CHECK-NEXT:    ret <4 x i8> [[TRUNC]]
 ;
   %shuf = shufflevector <4 x i32> %x, <4 x i32> undef, <4 x i32> <i32 2, i32 2, i32 2, i32 2>
@@ -492,14 +532,13 @@ define <4 x i8> @wide_splat1(<4 x i32> %x) {
   ret <4 x i8> %trunc
 }
 
-; FIXME:
 ; Test weird types.
 ; trunc (shuffle X, undef, SplatMask) --> shuffle (trunc X), undef, SplatMask
 
 define <3 x i31> @wide_splat2(<3 x i33> %x) {
 ; CHECK-LABEL: @wide_splat2(
-; CHECK-NEXT:    [[SHUF:%.*]] = shufflevector <3 x i33> %x, <3 x i33> undef, <3 x i32> <i32 1, i32 1, i32 1>
-; CHECK-NEXT:    [[TRUNC:%.*]] = trunc <3 x i33> [[SHUF]] to <3 x i31>
+; CHECK-NEXT:    [[TMP1:%.*]] = trunc <3 x i33> %x to <3 x i31>
+; CHECK-NEXT:    [[TRUNC:%.*]] = shufflevector <3 x i31> [[TMP1]], <3 x i31> undef, <3 x i32> <i32 1, i32 1, i32 1>
 ; CHECK-NEXT:    ret <3 x i31> [[TRUNC]]
 ;
   %shuf = shufflevector <3 x i33> %x, <3 x i33> undef, <3 x i32> <i32 1, i32 1, i32 1>
@@ -520,5 +559,51 @@ define <3 x i31> @wide_splat3(<3 x i33> %x) {
   %shuf = shufflevector <3 x i33> %x, <3 x i33> undef, <3 x i32> <i32 undef, i32 1, i32 1>
   %trunc = trunc <3 x i33> %shuf to <3 x i31>
   ret <3 x i31> %trunc
+}
+
+; TODO: The shuffle extends the length of the input vector. Should we shrink this?
+
+define <8 x i8> @wide_lengthening_splat(<4 x i16> %v) {
+; CHECK-LABEL: @wide_lengthening_splat(
+; CHECK-NEXT:    [[SHUF:%.*]] = shufflevector <4 x i16> %v, <4 x i16> undef, <8 x i32> zeroinitializer
+; CHECK-NEXT:    [[TR:%.*]] = trunc <8 x i16> [[SHUF]] to <8 x i8>
+; CHECK-NEXT:    ret <8 x i8> [[TR]]
+;
+  %shuf = shufflevector <4 x i16> %v, <4 x i16> %v, <8 x i32> zeroinitializer
+  %tr = trunc <8 x i16> %shuf to <8 x i8>
+  ret <8 x i8> %tr
+}
+
+define <2 x i8> @narrow_add_vec_constant(<2 x i32> %x) {
+; CHECK-LABEL: @narrow_add_vec_constant(
+; CHECK-NEXT:    [[TMP1:%.*]] = trunc <2 x i32> %x to <2 x i8>
+; CHECK-NEXT:    [[TR:%.*]] = add <2 x i8> [[TMP1]], <i8 0, i8 127>
+; CHECK-NEXT:    ret <2 x i8> [[TR]]
+;
+  %add = add <2 x i32> %x, <i32 256, i32 -129>
+  %tr = trunc <2 x i32> %add to <2 x i8>
+  ret <2 x i8> %tr
+}
+
+define <2 x i8> @narrow_mul_vec_constant(<2 x i32> %x) {
+; CHECK-LABEL: @narrow_mul_vec_constant(
+; CHECK-NEXT:    [[TMP1:%.*]] = trunc <2 x i32> %x to <2 x i8>
+; CHECK-NEXT:    [[TR:%.*]] = mul <2 x i8> [[TMP1]], <i8 0, i8 127>
+; CHECK-NEXT:    ret <2 x i8> [[TR]]
+;
+  %add = mul <2 x i32> %x, <i32 256, i32 -129>
+  %tr = trunc <2 x i32> %add to <2 x i8>
+  ret <2 x i8> %tr
+}
+
+define <2 x i8> @narrow_sub_vec_constant(<2 x i32> %x) {
+; CHECK-LABEL: @narrow_sub_vec_constant(
+; CHECK-NEXT:    [[TMP1:%.*]] = trunc <2 x i32> %x to <2 x i8>
+; CHECK-NEXT:    [[TR:%.*]] = sub <2 x i8> <i8 0, i8 127>, [[TMP1]]
+; CHECK-NEXT:    ret <2 x i8> [[TR]]
+;
+  %sub = sub <2 x i32> <i32 256, i32 -129>, %x
+  %tr = trunc <2 x i32> %sub to <2 x i8>
+  ret <2 x i8> %tr
 }
 

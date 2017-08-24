@@ -32,8 +32,8 @@
 #include "llvm/MC/MCValue.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/TargetRegistry.h"
+#include "llvm/Support/raw_ostream.h"
 #include <cassert>
 #include <vector>
 
@@ -99,13 +99,6 @@ public:
   void EmitTBSSSymbol(MCSection *Section, MCSymbol *Symbol, uint64_t Size,
                       unsigned ByteAlignment = 0) override;
 
-  void EmitFileDirective(StringRef Filename) override {
-    // FIXME: Just ignore the .file; it isn't important enough to fail the
-    // entire assembly.
-
-    // report_fatal_error("unsupported directive: '.file'");
-  }
-
   void EmitIdent(StringRef IdentString) override {
     llvm_unreachable("macho doesn't support this directive");
   }
@@ -149,7 +142,7 @@ static bool canGoAfterDWARF(const MCSectionMachO &MSec) {
 void MCMachOStreamer::ChangeSection(MCSection *Section,
                                     const MCExpr *Subsection) {
   // Change the section normally.
-  bool Created = MCObjectStreamer::changeSectionImpl(Section, Subsection);
+  bool Created = changeSectionImpl(Section, Subsection);
   const MCSectionMachO &MSec = *cast<MCSectionMachO>(Section);
   StringRef SegName = MSec.getSegmentName();
   if (SegName == "__DWARF")

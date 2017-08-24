@@ -90,6 +90,7 @@ public:
   /// @{
 
   void EmitLabel(MCSymbol *Symbol, SMLoc Loc = SMLoc()) override;
+  virtual void EmitLabel(MCSymbol *Symbol, SMLoc Loc, MCFragment *F);
   void EmitAssignment(MCSymbol *Symbol, const MCExpr *Value) override;
   void EmitValueImpl(const MCExpr *Value, unsigned Size,
                      SMLoc Loc = SMLoc()) override;
@@ -97,7 +98,8 @@ public:
   void EmitSLEB128Value(const MCExpr *Value) override;
   void EmitWeakReference(MCSymbol *Alias, const MCSymbol *Symbol) override;
   void ChangeSection(MCSection *Section, const MCExpr *Subsection) override;
-  void EmitInstruction(const MCInst &Inst, const MCSubtargetInfo& STI) override;
+  void EmitInstruction(const MCInst &Inst, const MCSubtargetInfo &STI,
+                       bool = false) override;
 
   /// \brief EmitValueImpl with additional param, that allows to emit PCRelative
   /// MCFixup.
@@ -157,6 +159,7 @@ public:
                 SMLoc Loc = SMLoc()) override;
   void emitFill(const MCExpr &NumValues, int64_t Size, int64_t Expr,
                 SMLoc Loc = SMLoc()) override;
+  void EmitFileDirective(StringRef Filename) override;
 
   void FinishImpl() override;
 

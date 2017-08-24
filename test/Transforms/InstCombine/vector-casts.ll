@@ -15,9 +15,9 @@ define <2 x i1> @test1(<2 x i64> %a) {
 ; The ashr turns into an lshr.
 define <2 x i64> @test2(<2 x i64> %a) {
 ; CHECK-LABEL: @test2(
-; CHECK-NEXT:    [[B:%.*]] = and <2 x i64> %a, <i64 65535, i64 65535>
-; CHECK-NEXT:    [[T:%.*]] = lshr <2 x i64> [[B]], <i64 1, i64 1>
-; CHECK-NEXT:    ret <2 x i64> [[T]]
+; CHECK-NEXT:    [[B:%.*]] = lshr <2 x i64> [[A:%.*]], <i64 1, i64 1>
+; CHECK-NEXT:    [[TMP1:%.*]] = and <2 x i64> [[B]], <i64 32767, i64 32767>
+; CHECK-NEXT:    ret <2 x i64> [[TMP1]]
 ;
   %b = and <2 x i64> %a, <i64 65535, i64 65535>
   %t = ashr <2 x i64> %b, <i64 1, i64 1>
@@ -61,7 +61,7 @@ define <2 x i64> @test5(<4 x float> %a, <4 x float> %b) {
 ; CHECK-LABEL: @test5(
 ; CHECK-NEXT:    [[CMP:%.*]] = fcmp ult <4 x float> %a, zeroinitializer
 ; CHECK-NEXT:    [[CMP4:%.*]] = fcmp ult <4 x float> %b, zeroinitializer
-; CHECK-NEXT:    [[NARROW:%.*]] = and <4 x i1> [[CMP4]], [[CMP]]
+; CHECK-NEXT:    [[NARROW:%.*]] = and <4 x i1> [[CMP]], [[CMP4]]
 ; CHECK-NEXT:    [[AND:%.*]] = sext <4 x i1> [[NARROW]] to <4 x i32>
 ; CHECK-NEXT:    [[CONV:%.*]] = bitcast <4 x i32> [[AND]] to <2 x i64>
 ; CHECK-NEXT:    ret <2 x i64> [[CONV]]
@@ -71,6 +71,42 @@ define <2 x i64> @test5(<4 x float> %a, <4 x float> %b) {
   %cmp4 = fcmp ult <4 x float> %b, zeroinitializer
   %sext5 = sext <4 x i1> %cmp4 to <4 x i32>
   %and = and <4 x i32> %sext, %sext5
+  %conv = bitcast <4 x i32> %and to <2 x i64>
+  ret <2 x i64> %conv
+}
+
+define <2 x i64> @test6(<4 x float> %a, <4 x float> %b) {
+; CHECK-LABEL: @test6(
+; CHECK-NEXT:    [[CMP:%.*]] = fcmp ult <4 x float> [[A:%.*]], zeroinitializer
+; CHECK-NEXT:    [[CMP4:%.*]] = fcmp ult <4 x float> [[B:%.*]], zeroinitializer
+; CHECK-NEXT:    [[NARROW:%.*]] = or <4 x i1> [[CMP]], [[CMP4]]
+; CHECK-NEXT:    [[AND:%.*]] = sext <4 x i1> [[NARROW]] to <4 x i32>
+; CHECK-NEXT:    [[CONV:%.*]] = bitcast <4 x i32> [[AND]] to <2 x i64>
+; CHECK-NEXT:    ret <2 x i64> [[CONV]]
+;
+  %cmp = fcmp ult <4 x float> %a, zeroinitializer
+  %sext = sext <4 x i1> %cmp to <4 x i32>
+  %cmp4 = fcmp ult <4 x float> %b, zeroinitializer
+  %sext5 = sext <4 x i1> %cmp4 to <4 x i32>
+  %and = or <4 x i32> %sext, %sext5
+  %conv = bitcast <4 x i32> %and to <2 x i64>
+  ret <2 x i64> %conv
+}
+
+define <2 x i64> @test7(<4 x float> %a, <4 x float> %b) {
+; CHECK-LABEL: @test7(
+; CHECK-NEXT:    [[CMP:%.*]] = fcmp ult <4 x float> [[A:%.*]], zeroinitializer
+; CHECK-NEXT:    [[CMP4:%.*]] = fcmp ult <4 x float> [[B:%.*]], zeroinitializer
+; CHECK-NEXT:    [[AND1:%.*]] = xor <4 x i1> [[CMP]], [[CMP4]]
+; CHECK-NEXT:    [[AND:%.*]] = sext <4 x i1> [[AND1]] to <4 x i32>
+; CHECK-NEXT:    [[CONV:%.*]] = bitcast <4 x i32> [[AND]] to <2 x i64>
+; CHECK-NEXT:    ret <2 x i64> [[CONV]]
+;
+  %cmp = fcmp ult <4 x float> %a, zeroinitializer
+  %sext = sext <4 x i1> %cmp to <4 x i32>
+  %cmp4 = fcmp ult <4 x float> %b, zeroinitializer
+  %sext5 = sext <4 x i1> %cmp4 to <4 x i32>
+  %and = xor <4 x i32> %sext, %sext5
   %conv = bitcast <4 x i32> %and to <2 x i64>
   ret <2 x i64> %conv
 }
@@ -216,6 +252,35 @@ define <8 x i32> @pr24458(<8 x float> %n) {
   ret <8 x i32> %wrong
 }
 
+; Hoist a trunc to a scalar if we're inserting into an undef vector.
+; trunc (inselt undef, X, Index) --> inselt undef, (trunc X), Index
+
+define <3 x i16> @trunc_inselt_undef(i32 %x) {
+; CHECK-LABEL: @trunc_inselt_undef(
+; CHECK-NEXT:    [[TMP1:%.*]] = trunc i32 %x to i16
+; CHECK-NEXT:    [[TRUNC:%.*]] = insertelement <3 x i16> undef, i16 [[TMP1]], i32 1
+; CHECK-NEXT:    ret <3 x i16> [[TRUNC]]
+;
+  %vec = insertelement <3 x i32> undef, i32 %x, i32 1
+  %trunc = trunc <3 x i32> %vec to <3 x i16>
+  ret <3 x i16> %trunc
+}
+
+; Hoist a trunc to a scalar if we're inserting into an undef vector.
+; trunc (inselt undef, X, Index) --> inselt undef, (trunc X), Index
+
+define <2 x float> @fptrunc_inselt_undef(double %x, i32 %index) {
+; CHECK-LABEL: @fptrunc_inselt_undef(
+; CHECK-NEXT:    [[TMP1:%.*]] = fptrunc double %x to float
+; CHECK-NEXT:    [[TRUNC:%.*]] = insertelement <2 x float> undef, float [[TMP1]], i32 %index
+; CHECK-NEXT:    ret <2 x float> [[TRUNC]]
+;
+  %vec = insertelement <2 x double> <double undef, double undef>, double %x, i32 %index
+  %trunc = fptrunc <2 x double> %vec to <2 x float>
+  ret <2 x float> %trunc
+}
+
+; TODO: Strengthen the backend, so we can have this canonicalization.
 ; Insert a scalar int into a constant vector and truncate:
 ; trunc (inselt C, X, Index) --> inselt C, (trunc X), Index
 
@@ -230,6 +295,7 @@ define <3 x i16> @trunc_inselt1(i32 %x) {
   ret <3 x i16> %trunc
 }
 
+; TODO: Strengthen the backend, so we can have this canonicalization.
 ; Insert a scalar FP into a constant vector and FP truncate:
 ; fptrunc (inselt C, X, Index) --> inselt C, (fptrunc X), Index
 
@@ -244,6 +310,7 @@ define <2 x float> @fptrunc_inselt1(double %x, i32 %index) {
   ret <2 x float> %trunc
 }
 
+; TODO: Strengthen the backend, so we can have this canonicalization.
 ; Insert a scalar int constant into a vector and truncate:
 ; trunc (inselt X, C, Index) --> inselt (trunc X), C', Index
 
@@ -258,6 +325,7 @@ define <8 x i16> @trunc_inselt2(<8 x i32> %x, i32 %index) {
   ret <8 x i16> %trunc
 }
 
+; TODO: Strengthen the backend, so we can have this canonicalization.
 ; Insert a scalar FP constant into a vector and FP truncate:
 ; fptrunc (inselt X, C, Index) --> inselt (fptrunc X), C', Index
 

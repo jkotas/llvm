@@ -71,6 +71,9 @@ public:
     return true;
   }
 
+  bool ComplexPatternFuncMutatesDAG() const override {
+    return true;
+  }
   void PreprocessISelDAG() override;
   void EmitFunctionEntryCode() override;
 
@@ -81,6 +84,7 @@ public:
   inline bool SelectAddrGP(SDValue &N, SDValue &R);
   bool SelectGlobalAddress(SDValue &N, SDValue &R, bool UseGP);
   bool SelectAddrFI(SDValue &N, SDValue &R);
+  bool DetectUseSxtw(SDValue &N, SDValue &R);
 
   StringRef getPassName() const override {
     return "Hexagon DAG->DAG Pattern Instruction Selection";
@@ -106,7 +110,6 @@ public:
   void SelectIndexedStore(StoreSDNode *ST, const SDLoc &dl);
   void SelectStore(SDNode *N);
   void SelectSHL(SDNode *N);
-  void SelectMul(SDNode *N);
   void SelectZeroExtend(SDNode *N);
   void SelectIntrinsicWChain(SDNode *N);
   void SelectIntrinsicWOChain(SDNode *N);
@@ -118,10 +121,17 @@ public:
   #include "HexagonGenDAGISel.inc"
 
 private:
-  bool isValueExtension(const SDValue &Val, unsigned FromBits, SDValue &Src);
+  bool keepsLowBits(const SDValue &Val, unsigned NumBits, SDValue &Src);
   bool isOrEquivalentToAdd(const SDNode *N) const;
   bool isAlignedMemNode(const MemSDNode *N) const;
+  bool isSmallStackStore(const StoreSDNode *N) const;
   bool isPositiveHalfWord(const SDNode *N) const;
+
+  // DAG preprocessing functions.
+  void ppSimplifyOrSelect0(std::vector<SDNode*> &&Nodes);
+  void ppAddrReorderAddShl(std::vector<SDNode*> &&Nodes);
+  void ppAddrRewriteAndSrl(std::vector<SDNode*> &&Nodes);
+  void ppHoistZextI1(std::vector<SDNode*> &&Nodes);
 
   SmallDenseMap<SDNode *,int> RootWeights;
   SmallDenseMap<SDNode *,int> RootHeights;
@@ -231,22 +241,31 @@ void HexagonDAGToDAGISel::SelectIndexedLoad(LoadSDNode *LD, const SDLoc &dl) {
   case MVT::v32i16:
   case MVT::v16i32:
   case MVT::v8i64:
-    if (isAlignedMemNode(LD))
-      Opcode = IsValidInc ? Hexagon::V6_vL32b_pi : Hexagon::V6_vL32b_ai;
-    else
+    if (isAlignedMemNode(LD)) {
+      if (LD->isNonTemporal())
+        Opcode = IsValidInc ? Hexagon::V6_vL32b_nt_pi : Hexagon::V6_vL32b_nt_ai;
+      else
+        Opcode = IsValidInc ? Hexagon::V6_vL32b_pi : Hexagon::V6_vL32b_ai;
+    } else {
       Opcode = IsValidInc ? Hexagon::V6_vL32Ub_pi : Hexagon::V6_vL32Ub_ai;
+    }
     break;
   // 128B
   case MVT::v128i8:
   case MVT::v64i16:
   case MVT::v32i32:
   case MVT::v16i64:
-    if (isAlignedMemNode(LD))
-      Opcode = IsValidInc ? Hexagon::V6_vL32b_pi_128B
-                          : Hexagon::V6_vL32b_ai_128B;
-    else
+    if (isAlignedMemNode(LD)) {
+      if (LD->isNonTemporal())
+        Opcode = IsValidInc ? Hexagon::V6_vL32b_nt_pi_128B
+                            : Hexagon::V6_vL32b_nt_ai_128B;
+      else
+        Opcode = IsValidInc ? Hexagon::V6_vL32b_pi_128B
+                            : Hexagon::V6_vL32b_ai_128B;
+    } else {
       Opcode = IsValidInc ? Hexagon::V6_vL32Ub_pi_128B
                           : Hexagon::V6_vL32Ub_ai_128B;
+    }
     break;
   default:
     llvm_unreachable("Unexpected memory type in indexed load");
@@ -519,22 +538,31 @@ void HexagonDAGToDAGISel::SelectIndexedStore(StoreSDNode *ST, const SDLoc &dl) {
   case MVT::v32i16:
   case MVT::v16i32:
   case MVT::v8i64:
-    if (isAlignedMemNode(ST))
-      Opcode = IsValidInc ? Hexagon::V6_vS32b_pi : Hexagon::V6_vS32b_ai;
-    else
+    if (isAlignedMemNode(ST)) {
+      if (ST->isNonTemporal())
+        Opcode = IsValidInc ? Hexagon::V6_vS32b_nt_pi : Hexagon::V6_vS32b_nt_ai;
+      else
+        Opcode = IsValidInc ? Hexagon::V6_vS32b_pi : Hexagon::V6_vS32b_ai;
+    } else {
       Opcode = IsValidInc ? Hexagon::V6_vS32Ub_pi : Hexagon::V6_vS32Ub_ai;
+    }
     break;
   // 128B
   case MVT::v128i8:
   case MVT::v64i16:
   case MVT::v32i32:
   case MVT::v16i64:
-    if (isAlignedMemNode(ST))
-      Opcode = IsValidInc ? Hexagon::V6_vS32b_pi_128B
-                          : Hexagon::V6_vS32b_ai_128B;
-    else
+    if (isAlignedMemNode(ST)) {
+      if (ST->isNonTemporal())
+        Opcode = IsValidInc ? Hexagon::V6_vS32b_nt_pi_128B
+                            : Hexagon::V6_vS32b_nt_ai_128B;
+      else
+        Opcode = IsValidInc ? Hexagon::V6_vS32b_pi_128B
+                            : Hexagon::V6_vS32b_ai_128B;
+    } else {
       Opcode = IsValidInc ? Hexagon::V6_vS32Ub_pi_128B
                           : Hexagon::V6_vS32Ub_ai_128B;
+    }
     break;
   default:
     llvm_unreachable("Unexpected memory type in indexed store");
@@ -589,90 +617,6 @@ void HexagonDAGToDAGISel::SelectStore(SDNode *N) {
   }
 
   SelectCode(ST);
-}
-
-void HexagonDAGToDAGISel::SelectMul(SDNode *N) {
-  SDLoc dl(N);
-
-  // %conv.i = sext i32 %tmp1 to i64
-  // %conv2.i = sext i32 %add to i64
-  // %mul.i = mul nsw i64 %conv2.i, %conv.i
-  //
-  //   --- match with the following ---
-  //
-  // %mul.i = mpy (%tmp1, %add)
-  //
-
-  if (N->getValueType(0) == MVT::i64) {
-    // Shifting a i64 signed multiply.
-    SDValue MulOp0 = N->getOperand(0);
-    SDValue MulOp1 = N->getOperand(1);
-
-    SDValue OP0;
-    SDValue OP1;
-
-    // Handle sign_extend and sextload.
-    if (MulOp0.getOpcode() == ISD::SIGN_EXTEND) {
-      SDValue Sext0 = MulOp0.getOperand(0);
-      if (Sext0.getNode()->getValueType(0) != MVT::i32) {
-        SelectCode(N);
-        return;
-      }
-      OP0 = Sext0;
-    } else if (MulOp0.getOpcode() == ISD::LOAD) {
-      LoadSDNode *LD = cast<LoadSDNode>(MulOp0.getNode());
-      if (LD->getMemoryVT() != MVT::i32 ||
-          LD->getExtensionType() != ISD::SEXTLOAD ||
-          LD->getAddressingMode() != ISD::UNINDEXED) {
-        SelectCode(N);
-        return;
-      }
-      SDValue Chain = LD->getChain();
-      SDValue TargetConst0 = CurDAG->getTargetConstant(0, dl, MVT::i32);
-      OP0 = SDValue(CurDAG->getMachineNode(Hexagon::L2_loadri_io, dl, MVT::i32,
-                                            MVT::Other,
-                                            LD->getBasePtr(), TargetConst0,
-                                            Chain), 0);
-    } else {
-      SelectCode(N);
-      return;
-    }
-
-    // Same goes for the second operand.
-    if (MulOp1.getOpcode() == ISD::SIGN_EXTEND) {
-      SDValue Sext1 = MulOp1.getOperand(0);
-      if (Sext1.getNode()->getValueType(0) != MVT::i32) {
-        SelectCode(N);
-        return;
-      }
-      OP1 = Sext1;
-    } else if (MulOp1.getOpcode() == ISD::LOAD) {
-      LoadSDNode *LD = cast<LoadSDNode>(MulOp1.getNode());
-      if (LD->getMemoryVT() != MVT::i32 ||
-          LD->getExtensionType() != ISD::SEXTLOAD ||
-          LD->getAddressingMode() != ISD::UNINDEXED) {
-        SelectCode(N);
-        return;
-      }
-      SDValue Chain = LD->getChain();
-      SDValue TargetConst0 = CurDAG->getTargetConstant(0, dl, MVT::i32);
-      OP1 = SDValue(CurDAG->getMachineNode(Hexagon::L2_loadri_io, dl, MVT::i32,
-                                            MVT::Other,
-                                            LD->getBasePtr(), TargetConst0,
-                                            Chain), 0);
-    } else {
-      SelectCode(N);
-      return;
-    }
-
-    // Generate a mpy instruction.
-    SDNode *Result = CurDAG->getMachineNode(Hexagon::M2_dpmpyss_s0, dl,
-                                            MVT::i64, OP0, OP1);
-    ReplaceNode(N, Result);
-    return;
-  }
-
-  SelectCode(N);
 }
 
 void HexagonDAGToDAGISel::SelectSHL(SDNode *N) {
@@ -837,7 +781,7 @@ void HexagonDAGToDAGISel::SelectIntrinsicWOChain(SDNode *N) {
 
   SDValue V = N->getOperand(1);
   SDValue U;
-  if (isValueExtension(V, Bits, U)) {
+  if (keepsLowBits(V, Bits, U)) {
     SDValue R = CurDAG->getNode(N->getOpcode(), SDLoc(N), N->getValueType(0),
                                 N->getOperand(0), U);
     ReplaceNode(N, R.getNode());
@@ -943,7 +887,6 @@ void HexagonDAGToDAGISel::Select(SDNode *N) {
   case ISD::SHL:                  return SelectSHL(N);
   case ISD::LOAD:                 return SelectLoad(N);
   case ISD::STORE:                return SelectStore(N);
-  case ISD::MUL:                  return SelectMul(N);
   case ISD::ZERO_EXTEND:          return SelectZeroExtend(N);
   case ISD::INTRINSIC_W_CHAIN:    return SelectIntrinsicWChain(N);
   case ISD::INTRINSIC_WO_CHAIN:   return SelectIntrinsicWOChain(N);
@@ -976,15 +919,52 @@ SelectInlineAsmMemoryOperand(const SDValue &Op, unsigned ConstraintID,
 }
 
 
-void HexagonDAGToDAGISel::PreprocessISelDAG() {
-  SelectionDAG &DAG = *CurDAG;
-  std::vector<SDNode*> Nodes;
-  for (SDNode &Node : DAG.allnodes())
-    Nodes.push_back(&Node);
+static bool isMemOPCandidate(SDNode *I, SDNode *U) {
+  // I is an operand of U. Check if U is an arithmetic (binary) operation
+  // usable in a memop, where the other operand is a loaded value, and the
+  // result of U is stored in the same location.
 
-  // Simplify: (or (select c x 0) z)  ->  (select c (or x z) z)
-  //           (or (select c 0 y) z)  ->  (select c z (or y z))
-  // This may not be the right thing for all targets, so do it here.
+  if (!U->hasOneUse())
+    return false;
+  unsigned Opc = U->getOpcode();
+  switch (Opc) {
+    case ISD::ADD:
+    case ISD::SUB:
+    case ISD::AND:
+    case ISD::OR:
+      break;
+    default:
+      return false;
+  }
+
+  SDValue S0 = U->getOperand(0);
+  SDValue S1 = U->getOperand(1);
+  SDValue SY = (S0.getNode() == I) ? S1 : S0;
+
+  SDNode *UUse = *U->use_begin();
+  if (UUse->getNumValues() != 1)
+    return false;
+
+  // Check if one of the inputs to U is a load instruction and the output
+  // is used by a store instruction. If so and they also have the same
+  // base pointer, then don't preoprocess this node sequence as it
+  // can be matched to a memop.
+  SDNode *SYNode = SY.getNode();
+  if (UUse->getOpcode() == ISD::STORE && SYNode->getOpcode() == ISD::LOAD) {
+    SDValue LDBasePtr = cast<MemSDNode>(SYNode)->getBasePtr();
+    SDValue STBasePtr = cast<MemSDNode>(UUse)->getBasePtr();
+    if (LDBasePtr == STBasePtr)
+      return true;
+  }
+  return false;
+}
+
+
+// Transform: (or (select c x 0) z)  ->  (select c (or x z) z)
+//            (or (select c 0 y) z)  ->  (select c z (or y z))
+void HexagonDAGToDAGISel::ppSimplifyOrSelect0(std::vector<SDNode*> &&Nodes) {
+  SelectionDAG &DAG = *CurDAG;
+
   for (auto I : Nodes) {
     if (I->getOpcode() != ISD::OR)
       continue;
@@ -1022,13 +1002,17 @@ void HexagonDAGToDAGISel::PreprocessISelDAG() {
       }
     }
   }
+}
 
-  // Transform: (store ch val (add x (add (shl y c) e)))
-  //        to: (store ch val (add x (shl (add y d) c))),
-  // where e = (shl d c) for some integer d.
-  // The purpose of this is to enable generation of loads/stores with
-  // shifted addressing mode, i.e. mem(x+y<<#c). For that, the shift
-  // value c must be 0, 1 or 2.
+// Transform: (store ch val (add x (add (shl y c) e)))
+//        to: (store ch val (add x (shl (add y d) c))),
+// where e = (shl d c) for some integer d.
+// The purpose of this is to enable generation of loads/stores with
+// shifted addressing mode, i.e. mem(x+y<<#c). For that, the shift
+// value c must be 0, 1 or 2.
+void HexagonDAGToDAGISel::ppAddrReorderAddShl(std::vector<SDNode*> &&Nodes) {
+  SelectionDAG &DAG = *CurDAG;
+
   for (auto I : Nodes) {
     if (I->getOpcode() != ISD::STORE)
       continue;
@@ -1075,20 +1059,24 @@ void HexagonDAGToDAGISel::PreprocessISelDAG() {
     SDValue NewShl = DAG.getNode(ISD::SHL, DL, VT, NewAdd, C);
     ReplaceNode(T0.getNode(), NewShl.getNode());
   }
+}
 
-  // Transform (load ch (add x (and (srl y c) Mask)))
-  //       to: (load ch (add x (shl (srl y d) d-c)))
-  // where
-  // Mask = 00..0 111..1 0.0
-  //          |     |     +-- d-c 0s, and d-c is 0, 1 or 2.
-  //          |     +-------- 1s
-  //          +-------------- at most c 0s
-  // Motivating example:
-  // DAG combiner optimizes (add x (shl (srl y 5) 2))
-  //                     to (add x (and (srl y 3) 1FFFFFFC))
-  // which results in a constant-extended and(##...,lsr). This transformation
-  // undoes this simplification for cases where the shl can be folded into
-  // an addressing mode.
+// Transform: (load ch (add x (and (srl y c) Mask)))
+//        to: (load ch (add x (shl (srl y d) d-c)))
+// where
+// Mask = 00..0 111..1 0.0
+//          |     |     +-- d-c 0s, and d-c is 0, 1 or 2.
+//          |     +-------- 1s
+//          +-------------- at most c 0s
+// Motivating example:
+// DAG combiner optimizes (add x (shl (srl y 5) 2))
+//                     to (add x (and (srl y 3) 1FFFFFFC))
+// which results in a constant-extended and(##...,lsr). This transformation
+// undoes this simplification for cases where the shl can be folded into
+// an addressing mode.
+void HexagonDAGToDAGISel::ppAddrRewriteAndSrl(std::vector<SDNode*> &&Nodes) {
+  SelectionDAG &DAG = *CurDAG;
+
   for (SDNode *N : Nodes) {
     unsigned Opc = N->getOpcode();
     if (Opc != ISD::LOAD && Opc != ISD::STORE)
@@ -1147,15 +1135,116 @@ void HexagonDAGToDAGISel::PreprocessISelDAG() {
     SDValue NewShl = DAG.getNode(ISD::SHL, dl, VT, NewSrl, DC);
     ReplaceNode(T0.getNode(), NewShl.getNode());
   }
+}
+
+// Transform: (op ... (zext i1 c) ...) -> (select c (op ... 0 ...)
+//                                                  (op ... 1 ...))
+void HexagonDAGToDAGISel::ppHoistZextI1(std::vector<SDNode*> &&Nodes) {
+  SelectionDAG &DAG = *CurDAG;
+
+  for (SDNode *N : Nodes) {
+    unsigned Opc = N->getOpcode();
+    if (Opc != ISD::ZERO_EXTEND)
+      continue;
+    SDValue OpI1 = N->getOperand(0);
+    EVT OpVT = OpI1.getValueType();
+    if (!OpVT.isSimple() || OpVT.getSimpleVT() != MVT::i1)
+      continue;
+    for (auto I = N->use_begin(), E = N->use_end(); I != E; ++I) {
+      SDNode *U = *I;
+      if (U->getNumValues() != 1)
+        continue;
+      EVT UVT = U->getValueType(0);
+      if (!UVT.isSimple() || !UVT.isInteger() || UVT.getSimpleVT() == MVT::i1)
+        continue;
+      if (isMemOPCandidate(N, U))
+        continue;
+
+      // Potentially simplifiable operation.
+      unsigned I1N = I.getOperandNo();
+      SmallVector<SDValue,2> Ops(U->getNumOperands());
+      for (unsigned i = 0, n = U->getNumOperands(); i != n; ++i)
+        Ops[i] = U->getOperand(i);
+      EVT BVT = Ops[I1N].getValueType();
+
+      SDLoc dl(U);
+      SDValue C0 = DAG.getConstant(0, dl, BVT);
+      SDValue C1 = DAG.getConstant(1, dl, BVT);
+      SDValue If0, If1;
+
+      if (isa<MachineSDNode>(U)) {
+        unsigned UseOpc = U->getMachineOpcode();
+        Ops[I1N] = C0;
+        If0 = SDValue(DAG.getMachineNode(UseOpc, dl, UVT, Ops), 0);
+        Ops[I1N] = C1;
+        If1 = SDValue(DAG.getMachineNode(UseOpc, dl, UVT, Ops), 0);
+      } else {
+        unsigned UseOpc = U->getOpcode();
+        Ops[I1N] = C0;
+        If0 = DAG.getNode(UseOpc, dl, UVT, Ops);
+        Ops[I1N] = C1;
+        If1 = DAG.getNode(UseOpc, dl, UVT, Ops);
+      }
+      SDValue Sel = DAG.getNode(ISD::SELECT, dl, UVT, OpI1, If1, If0);
+      DAG.ReplaceAllUsesWith(U, Sel.getNode());
+    }
+  }
+}
+
+void HexagonDAGToDAGISel::PreprocessISelDAG() {
+  // Repack all nodes before calling each preprocessing function,
+  // because each of them can modify the set of nodes.
+  auto getNodes = [this] () -> std::vector<SDNode*> {
+    std::vector<SDNode*> T;
+    T.reserve(CurDAG->allnodes_size());
+    for (SDNode &N : CurDAG->allnodes())
+      T.push_back(&N);
+    return T;
+  };
+
+  // Transform: (or (select c x 0) z)  ->  (select c (or x z) z)
+  //            (or (select c 0 y) z)  ->  (select c z (or y z))
+  ppSimplifyOrSelect0(getNodes());
+
+  // Transform: (store ch val (add x (add (shl y c) e)))
+  //        to: (store ch val (add x (shl (add y d) c))),
+  // where e = (shl d c) for some integer d.
+  // The purpose of this is to enable generation of loads/stores with
+  // shifted addressing mode, i.e. mem(x+y<<#c). For that, the shift
+  // value c must be 0, 1 or 2.
+  ppAddrReorderAddShl(getNodes());
+
+  // Transform: (load ch (add x (and (srl y c) Mask)))
+  //        to: (load ch (add x (shl (srl y d) d-c)))
+  // where
+  // Mask = 00..0 111..1 0.0
+  //          |     |     +-- d-c 0s, and d-c is 0, 1 or 2.
+  //          |     +-------- 1s
+  //          +-------------- at most c 0s
+  // Motivating example:
+  // DAG combiner optimizes (add x (shl (srl y 5) 2))
+  //                     to (add x (and (srl y 3) 1FFFFFFC))
+  // which results in a constant-extended and(##...,lsr). This transformation
+  // undoes this simplification for cases where the shl can be folded into
+  // an addressing mode.
+  ppAddrRewriteAndSrl(getNodes());
+
+  // Transform: (op ... (zext i1 c) ...) -> (select c (op ... 0 ...)
+  //                                                  (op ... 1 ...))
+  ppHoistZextI1(getNodes());
+
+  DEBUG_WITH_TYPE("isel", {
+    dbgs() << "Preprocessed (Hexagon) selection DAG:";
+    CurDAG->dump();
+  });
 
   if (EnableAddressRebalancing) {
     rebalanceAddressTrees();
 
-    DEBUG(
-      dbgs() << "************* SelectionDAG after preprocessing: ***********\n";
+    DEBUG_WITH_TYPE("isel", {
+      dbgs() << "Address tree balanced selection DAG:";
       CurDAG->dump();
-      dbgs() << "************* End SelectionDAG after preprocessing ********\n";
-    );
+    });
   }
 }
 
@@ -1175,7 +1264,7 @@ void HexagonDAGToDAGISel::EmitFunctionEntryCode() {
 }
 
 // Match a frame index that can be used in an addressing mode.
-bool HexagonDAGToDAGISel::SelectAddrFI(SDValue& N, SDValue &R) {
+bool HexagonDAGToDAGISel::SelectAddrFI(SDValue &N, SDValue &R) {
   if (N.getOpcode() != ISD::FrameIndex)
     return false;
   auto &HFI = *HST->getFrameLowering();
@@ -1236,16 +1325,83 @@ bool HexagonDAGToDAGISel::SelectGlobalAddress(SDValue &N, SDValue &R,
   return false;
 }
 
-bool HexagonDAGToDAGISel::isValueExtension(const SDValue &Val,
-      unsigned FromBits, SDValue &Src) {
+bool HexagonDAGToDAGISel::DetectUseSxtw(SDValue &N, SDValue &R) {
+  // This (complex pattern) function is meant to detect a sign-extension
+  // i32->i64 on a per-operand basis. This would allow writing single
+  // patterns that would cover a number of combinations of different ways
+  // a sign-extensions could be written. For example:
+  //   (mul (DetectUseSxtw x) (DetectUseSxtw y)) -> (M2_dpmpyss_s0 x y)
+  // could match either one of these:
+  //   (mul (sext x) (sext_inreg y))
+  //   (mul (sext-load *p) (sext_inreg y))
+  //   (mul (sext_inreg x) (sext y))
+  // etc.
+  //
+  // The returned value will have type i64 and its low word will
+  // contain the value being extended. The high bits are not specified.
+  // The returned type is i64 because the original type of N was i64,
+  // but the users of this function should only use the low-word of the
+  // result, e.g.
+  //  (mul sxtw:x, sxtw:y) -> (M2_dpmpyss_s0 (LoReg sxtw:x), (LoReg sxtw:y))
+
+  if (N.getValueType() != MVT::i64)
+    return false;
+  EVT SrcVT;
+  unsigned Opc = N.getOpcode();
+  switch (Opc) {
+    case ISD::SIGN_EXTEND:
+    case ISD::SIGN_EXTEND_INREG: {
+      // sext_inreg has the source type as a separate operand.
+      EVT T = Opc == ISD::SIGN_EXTEND
+                ? N.getOperand(0).getValueType()
+                : cast<VTSDNode>(N.getOperand(1))->getVT();
+      if (T.getSizeInBits() != 32)
+        return false;
+      R = N.getOperand(0);
+      break;
+    }
+    case ISD::LOAD: {
+      LoadSDNode *L = cast<LoadSDNode>(N);
+      if (L->getExtensionType() != ISD::SEXTLOAD)
+        return false;
+      // All extending loads extend to i32, so even if the value in
+      // memory is shorter than 32 bits, it will be i32 after the load.
+      if (L->getMemoryVT().getSizeInBits() > 32)
+        return false;
+      R = N;
+      break;
+    }
+    default:
+      return false;
+  }
+  EVT RT = R.getValueType();
+  if (RT == MVT::i64)
+    return true;
+  assert(RT == MVT::i32);
+  // This is only to produce a value of type i64. Do not rely on the
+  // high bits produced by this.
+  const SDLoc &dl(N);
+  SDValue Ops[] = {
+    CurDAG->getTargetConstant(Hexagon::DoubleRegsRegClassID, dl, MVT::i32),
+    R, CurDAG->getTargetConstant(Hexagon::isub_hi, dl, MVT::i32),
+    R, CurDAG->getTargetConstant(Hexagon::isub_lo, dl, MVT::i32)
+  };
+  SDNode *T = CurDAG->getMachineNode(TargetOpcode::REG_SEQUENCE, dl,
+                                     MVT::i64, Ops);
+  R = SDValue(T, 0);
+  return true;
+}
+
+bool HexagonDAGToDAGISel::keepsLowBits(const SDValue &Val, unsigned NumBits,
+      SDValue &Src) {
   unsigned Opc = Val.getOpcode();
   switch (Opc) {
   case ISD::SIGN_EXTEND:
   case ISD::ZERO_EXTEND:
   case ISD::ANY_EXTEND: {
-    SDValue const &Op0 = Val.getOperand(0);
+    const SDValue &Op0 = Val.getOperand(0);
     EVT T = Op0.getValueType();
-    if (T.isInteger() && T.getSizeInBits() == FromBits) {
+    if (T.isInteger() && T.getSizeInBits() == NumBits) {
       Src = Op0;
       return true;
     }
@@ -1256,23 +1412,23 @@ bool HexagonDAGToDAGISel::isValueExtension(const SDValue &Val,
   case ISD::AssertZext:
     if (Val.getOperand(0).getValueType().isInteger()) {
       VTSDNode *T = cast<VTSDNode>(Val.getOperand(1));
-      if (T->getVT().getSizeInBits() == FromBits) {
+      if (T->getVT().getSizeInBits() == NumBits) {
         Src = Val.getOperand(0);
         return true;
       }
     }
     break;
   case ISD::AND: {
-    // Check if this is an AND with "FromBits" of lower bits set to 1.
-    uint64_t FromMask = (1 << FromBits) - 1;
+    // Check if this is an AND with NumBits of lower bits set to 1.
+    uint64_t Mask = (1 << NumBits) - 1;
     if (ConstantSDNode *C = dyn_cast<ConstantSDNode>(Val.getOperand(0))) {
-      if (C->getZExtValue() == FromMask) {
+      if (C->getZExtValue() == Mask) {
         Src = Val.getOperand(1);
         return true;
       }
     }
     if (ConstantSDNode *C = dyn_cast<ConstantSDNode>(Val.getOperand(1))) {
-      if (C->getZExtValue() == FromMask) {
+      if (C->getZExtValue() == Mask) {
         Src = Val.getOperand(0);
         return true;
       }
@@ -1281,16 +1437,16 @@ bool HexagonDAGToDAGISel::isValueExtension(const SDValue &Val,
   }
   case ISD::OR:
   case ISD::XOR: {
-    // OR/XOR with the lower "FromBits" bits set to 0.
-    uint64_t FromMask = (1 << FromBits) - 1;
+    // OR/XOR with the lower NumBits bits set to 0.
+    uint64_t Mask = (1 << NumBits) - 1;
     if (ConstantSDNode *C = dyn_cast<ConstantSDNode>(Val.getOperand(0))) {
-      if ((C->getZExtValue() & FromMask) == 0) {
+      if ((C->getZExtValue() & Mask) == 0) {
         Src = Val.getOperand(1);
         return true;
       }
     }
     if (ConstantSDNode *C = dyn_cast<ConstantSDNode>(Val.getOperand(1))) {
-      if ((C->getZExtValue() & FromMask) == 0) {
+      if ((C->getZExtValue() & Mask) == 0) {
         Src = Val.getOperand(0);
         return true;
       }
@@ -1323,6 +1479,20 @@ bool HexagonDAGToDAGISel::isOrEquivalentToAdd(const SDNode *N) const {
 
 bool HexagonDAGToDAGISel::isAlignedMemNode(const MemSDNode *N) const {
   return N->getAlignment() >= N->getMemoryVT().getStoreSize();
+}
+
+bool HexagonDAGToDAGISel::isSmallStackStore(const StoreSDNode *N) const {
+  unsigned StackSize = MF->getFrameInfo().estimateStackSize(*MF);
+  switch (N->getMemoryVT().getStoreSize()) {
+    case 1:
+      return StackSize <= 56;   // 1*2^6 - 8
+    case 2:
+      return StackSize <= 120;  // 2*2^6 - 8
+    case 4:
+      return StackSize <= 248;  // 4*2^6 - 8
+    default:
+      return false;
+  }
 }
 
 // Return true when the given node fits in a positive half word.

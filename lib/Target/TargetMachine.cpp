@@ -31,10 +31,6 @@
 #include "llvm/Target/TargetSubtargetInfo.h"
 using namespace llvm;
 
-cl::opt<bool> EnableIPRA("enable-ipra", cl::init(false), cl::Hidden,
-                         cl::desc("Enable interprocedural register allocation "
-                                  "to reduce load/store at procedure calls."));
-
 //---------------------------------------------------------------------------
 // TargetMachine Class
 //
@@ -45,8 +41,6 @@ TargetMachine::TargetMachine(const Target &T, StringRef DataLayoutString,
     : TheTarget(T), DL(DataLayoutString), TargetTriple(TT), TargetCPU(CPU),
       TargetFS(FS), AsmInfo(nullptr), MRI(nullptr), MII(nullptr), STI(nullptr),
       RequireStructuredCFG(false), DefaultOptions(Options), Options(Options) {
-  if (EnableIPRA.getNumOccurrences())
-    this->Options.EnableIPRA = EnableIPRA;
 }
 
 TargetMachine::~TargetMachine() {
@@ -74,7 +68,6 @@ void TargetMachine::resetTargetOptions(const Function &F) const {
       Options.X = DefaultOptions.X;                                            \
   } while (0)
 
-  RESET_OPTION(LessPreciseFPMADOption, "less-precise-fpmad");
   RESET_OPTION(UnsafeFPMath, "unsafe-fp-math");
   RESET_OPTION(NoInfsFPMath, "no-infs-fp-math");
   RESET_OPTION(NoNaNsFPMath, "no-nans-fp-math");
@@ -155,8 +148,9 @@ bool TargetMachine::shouldAssumeDSOLocal(const Module &M,
       return true;
 
     bool IsTLS = GV && GV->isThreadLocal();
-    bool IsAccessViaCopyRelocs =
-        Options.MCOptions.MCPIECopyRelocations && GV && isa<GlobalVariable>(GV);
+    bool IsAccessViaCopyRelocs = Options.MCOptions.MCPIECopyRelocations && GV &&
+                                 isa<GlobalVariable>(GV) &&
+                                 !GV->hasExternalWeakLinkage();
     Triple::ArchType Arch = TT.getArch();
     bool IsPPC =
         Arch == Triple::ppc || Arch == Triple::ppc64 || Arch == Triple::ppc64le;

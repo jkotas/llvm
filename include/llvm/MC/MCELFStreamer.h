@@ -42,6 +42,7 @@ public:
   void InitSections(bool NoExecStack) override;
   void ChangeSection(MCSection *Section, const MCExpr *Subsection) override;
   void EmitLabel(MCSymbol *Symbol, SMLoc Loc = SMLoc()) override;
+  void EmitLabel(MCSymbol *Symbol, SMLoc Loc, MCFragment *F) override;
   void EmitAssemblerFlag(MCAssemblerFlag Flag) override;
   void EmitThumbFunc(MCSymbol *Func) override;
   void EmitWeakReference(MCSymbol *Alias, const MCSymbol *Symbol) override;
@@ -61,8 +62,6 @@ public:
                       unsigned ByteAlignment = 0) override;
   void EmitValueImpl(const MCExpr *Value, unsigned Size,
                      SMLoc Loc = SMLoc()) override;
-
-  void EmitFileDirective(StringRef Filename) override;
 
   void EmitIdent(StringRef IdentString) override;
 

@@ -22,21 +22,23 @@
 #include <pthread.h>
 
 #if defined(__FreeBSD__)
-#include <pthread_np.h>
+#include <pthread_np.h> // For pthread_getthreadid_np()
+#endif
+
+#if defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
+#include <errno.h>
+#include <sys/sysctl.h>
+#include <sys/user.h>
+#include <unistd.h>
 #endif
 
 #if defined(__NetBSD__)
-#include <lwp.h>
+#include <lwp.h> // For _lwp_self()
 #endif
 
 #if defined(__linux__)
-#include <unistd.h>
-#include <sys/syscall.h>
-#endif
-
-#if defined(__NetBSD__) || defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
-#include <sys/sysctl.h>
-#include <sys/user.h>
+#include <sys/syscall.h> // For syscall codes
+#include <unistd.h>      // For syscall()
 #endif
 
 namespace {
@@ -104,13 +106,46 @@ uint64_t llvm::get_threadid() {
 }
 
 
+static constexpr uint32_t get_max_thread_name_length_impl() {
+#if defined(__NetBSD__)
+	return PTHREAD_MAX_NAMELEN_NP;
+#elif defined(__APPLE__)
+	return 64;
+#elif defined(__linux__)
+#if HAVE_PTHREAD_SETNAME_NP
+	return 16;
+#else
+	return 0;
+#endif
+#elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
+  return 16;
+#else
+  return 0;
+#endif
+}
+
+uint32_t llvm::get_max_thread_name_length() {
+  return get_max_thread_name_length_impl();
+}
+
 void llvm::set_thread_name(const Twine &Name) {
   // Make sure the input is null terminated.
   SmallString<64> Storage;
   StringRef NameStr = Name.toNullTerminatedStringRef(Storage);
+
+  // Truncate from the beginning, not the end, if the specified name is too
+  // long.  For one, this ensures that the resulting string is still null
+  // terminated, but additionally the end of a long thread name will usually
+  // be more unique than the beginning, since a common pattern is for similar
+  // threads to share a common prefix.
+  if (get_max_thread_name_length() > 0)
+    NameStr = NameStr.take_back(get_max_thread_name_length());
+  (void)NameStr;
 #if defined(__linux__)
 #if (defined(__GLIBC__) && defined(_GNU_SOURCE)) || defined(__ANDROID__)
+#if HAVE_PTHREAD_SETNAME_NP
   ::pthread_setname_np(::pthread_self(), NameStr.data());
+#endif
 #endif
 #elif defined(__FreeBSD__)
   ::pthread_set_name_np(::pthread_self(), NameStr.data());
@@ -162,16 +197,19 @@ void llvm::get_thread_name(SmallVectorImpl<char> &Name) {
   free(kp);
   return;
 #elif defined(__NetBSD__)
-  char buf[PTHREAD_MAX_NAMELEN_NP];
-  ::pthread_getname_np(::pthread_self(), buf, PTHREAD_MAX_NAMELEN_NP);
+  constexpr uint32_t len = get_max_thread_name_length_impl();
+  char buf[len];
+  ::pthread_getname_np(::pthread_self(), buf, len);
 
   Name.append(buf, buf + strlen(buf));
 #elif defined(__linux__)
 #if (defined(__GLIBC__) && defined(_GNU_SOURCE)) || defined(__ANDROID__)
-  constexpr int MAXNAMELEN = 16;
-  char Buffer[MAXNAMELEN];
-  if (0 == ::pthread_getname_np(::pthread_self(), Buffer, MAXNAMELEN))
+#if HAVE_PTHREAD_GETNAME_NP
+  constexpr uint32_t len = get_max_thread_name_length_impl();
+  char Buffer[len];
+  if (0 == ::pthread_getname_np(::pthread_self(), Buffer, len))
     Name.append(Buffer, Buffer + strlen(Buffer));
+#endif
 #endif
 #endif
 }
